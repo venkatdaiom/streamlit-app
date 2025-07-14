@@ -14,7 +14,7 @@ logger = logging.getLogger(__name__)
 
 # Configuration
 PROJECT_ID = os.getenv("PROJECT_ID", "call-data-461809")
-DATASET_ID = os.getenv("DATASET_ID", "venkat_data")
+DATASET_ID = os.getenv("DATASET_ID", "venkat_data_india")
 BUCKET_NAME = os.getenv("BUCKET_NAME", "json_bucket4938")
 STAGING_TABLE = os.getenv("STAGING_TABLE", "product_reveiws")
 FACT_TABLE = os.getenv("FACT_TABLE", "fact_reviews")
