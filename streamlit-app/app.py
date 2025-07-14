@@ -58,41 +58,88 @@ def debug_upload():
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
+
 def process_file(uploaded_file):
     try:
         logger.info(f"Processing file: {uploaded_file.name}")
         
-        # Debug: Save raw file
-        raw_content = uploaded_file.getvalue()
-        with open("/tmp/last_upload.csv", "wb") as f:
-            f.write(raw_content)
-            
-        # Read with error handling
-        try:
-            df = pd.read_csv(
-                BytesIO(raw_content),
-                encoding='utf-8',
-                on_bad_lines='warn',
-                dtype={'Rating': 'Int64'}
-            )
-        except Exception as e:
-            logger.error(f"CSV read failed: {traceback.format_exc()}")
-            raise ValueError(f"Invalid CSV format: {str(e)}")
+        # 1. Read and validate CSV
+        df = pd.read_csv(uploaded_file, encoding='utf-8', on_bad_lines='warn')
         
-        # Validate
+        # Validate required columns
         required_cols = {'Date and Time', 'Rating', 'Location ID'}
-        missing = required_cols - set(df.columns)
-        if missing:
-            raise ValueError(f"Missing columns: {missing}")
+        if not required_cols.issubset(df.columns):
+            missing = required_cols - set(df.columns)
+            raise ValueError(f"Missing required columns: {missing}")
+
+        # 2. Upload to GCS
+        blob_name = f"uploads/{datetime.datetime.now().strftime('%Y%m%d-%H%M%S')}_{uploaded_file.name}"
+        blob = gcs.bucket(BUCKET_NAME).blob(blob_name)
         
-        # Processing continues...
-        logger.info(f"Successfully read {len(df)} rows")
+        # Convert to JSONL
+        jsonl = df.to_json(orient='records', lines=True)
+        blob.upload_from_string(jsonl, content_type='application/jsonl')
+        logger.info(f"Uploaded to GCS: gs://{BUCKET_NAME}/{blob_name}")
+        
+        # 3. Load to BigQuery staging
+        job_config = bigquery.LoadJobConfig(
+            source_format=bigquery.SourceFormat.NEWLINE_DELIMITED_JSON,
+            write_disposition="WRITE_APPEND",
+            autodetect=True
+        )
+        
+        load_job = bq.load_table_from_uri(
+            f"gs://{BUCKET_NAME}/{blob_name}",
+            f"{PROJECT_ID}.{DATASET_ID}.{STAGING_TABLE}",
+            job_config=job_config
+        )
+        load_job.result()
+        logger.info(f"Loaded {load_job.output_rows} rows to staging")
+        
+        # 4. Update fact table
+        merge_query = f"""
+        MERGE `{PROJECT_ID}.{DATASET_ID}.{FACT_TABLE}` T
+        USING (
+          SELECT
+            PARSE_TIMESTAMP('%Y-%m-%d %H:%M:%S', `Date and Time`) as review_timestamp,
+            `Location ID` as location_id,
+            GENERATE_UUID() AS review_id,
+            `Location ID` AS location_id,
+            EXTRACT(DATE FROM PARSE_TIMESTAMP('%Y-%m-%d %H:%M:%S', `Date and Time`)) AS review_date,
+            Rating AS rating,
+            LENGTH(COALESCE(Review, '')) AS review_length,
+            LENGTH(COALESCE(Reply, '')) AS reply_length,
+            CASE WHEN Review IS NULL THEN 0 ELSE 1 END AS has_review,
+            CASE WHEN Reply IS NULL THEN 0 ELSE 1 END AS has_reply,
+            Review AS review_text,
+            Reply AS reply_text,
+            Name AS customer_name,
+            CURRENT_TIMESTAMP() AS etl_load_time
+          FROM `{PROJECT_ID}.{DATASET_ID}.{STAGING_TABLE}`
+          WHERE `Date and Time` IS NOT NULL
+        ) S
+        ON T.review_timestamp = S.review_timestamp
+        AND T.location_id = S.location_id
+        WHEN NOT MATCHED THEN
+          INSERT (review_id, location_id, review_date, rating, review_length, 
+                  reply_length, has_review, has_reply, review_text, 
+                  reply_text, customer_name, review_timestamp, etl_load_time)
+          VALUES (review_id, location_id, review_date, rating, review_length,
+                  reply_length, has_review, has_reply, review_text,
+                  reply_text, customer_name, review_timestamp, etl_load_time)
+        """
+        
+        query_job = bq.query(merge_query)
+        query_job.result()
+        logger.info(f"Merged {query_job.num_dml_affected_rows} rows to fact table")
+        
         return True
         
     except Exception as e:
         logger.error(f"Processing failed: {traceback.format_exc()}")
-        raise
-
+        st.error(f"❌ Processing failed: {str(e)}")
+        st.code(traceback.format_exc())
+        return False
 def main():
     st.set_page_config(layout="wide", page_title="Data Upload Portal")
     st.title("📥 Data Upload Portal")
