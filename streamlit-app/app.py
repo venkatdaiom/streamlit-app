@@ -98,37 +98,36 @@ def process_file(uploaded_file):
         
         # 4. Update fact table
         merge_query = f"""
-        MERGE `{PROJECT_ID}.{DATASET_ID}.{FACT_TABLE}` T
-        USING (
-          SELECT
-            PARSE_TIMESTAMP('%Y-%m-%d %H:%M:%S', `Date and Time`) as review_timestamp,
-            `Location ID` as location_id,
-            GENERATE_UUID() AS review_id,
-            `Location ID` AS location_id,
-            EXTRACT(DATE FROM PARSE_TIMESTAMP('%Y-%m-%d %H:%M:%S', `Date and Time`)) AS review_date,
-            Rating AS rating,
-            LENGTH(COALESCE(Review, '')) AS review_length,
-            LENGTH(COALESCE(Reply, '')) AS reply_length,
-            CASE WHEN Review IS NULL THEN 0 ELSE 1 END AS has_review,
-            CASE WHEN Reply IS NULL THEN 0 ELSE 1 END AS has_reply,
-            Review AS review_text,
-            Reply AS reply_text,
-            Name AS customer_name,
-            CURRENT_TIMESTAMP() AS etl_load_time
-          FROM `{PROJECT_ID}.{DATASET_ID}.{STAGING_TABLE}`
-          WHERE `Date and Time` IS NOT NULL
-        ) S
-        ON T.review_timestamp = S.review_timestamp
-        AND T.location_id = S.location_id
-        WHEN NOT MATCHED THEN
-          INSERT (review_id, location_id, review_date, rating, review_length, 
-                  reply_length, has_review, has_reply, review_text, 
-                  reply_text, customer_name, review_timestamp, etl_load_time)
-          VALUES (review_id, location_id, review_date, rating, review_length,
-                  reply_length, has_review, has_reply, review_text,
-                  reply_text, customer_name, review_timestamp, etl_load_time)
-        """
-        
+MERGE `{PROJECT_ID}.{DATASET_ID}.{FACT_TABLE}` T
+USING (
+  SELECT
+    `Date and Time` as source_timestamp_string,
+    `Location ID` as location_id,
+    GENERATE_UUID() AS review_id,
+    `Location ID` AS location_id,
+    EXTRACT(DATE FROM TIMESTAMP(`Date and Time`)) AS review_date,
+    Rating AS rating,
+    LENGTH(COALESCE(Review, '')) AS review_length,
+    LENGTH(COALESCE(Reply, '')) AS reply_length,
+    CASE WHEN Review IS NULL THEN 0 ELSE 1 END AS has_review,
+    CASE WHEN Reply IS NULL THEN 0 ELSE 1 END AS has_reply,
+    Review AS review_text,
+    Reply AS reply_text,
+    Name AS customer_name,
+    CURRENT_TIMESTAMP() AS etl_load_time
+  FROM `{PROJECT_ID}.{DATASET_ID}.{STAGING_TABLE}`
+  WHERE `Date and Time` IS NOT NULL
+) S
+ON T.review_timestamp = TIMESTAMP(S.source_timestamp_string)
+AND T.location_id = S.location_id
+WHEN NOT MATCHED THEN
+  INSERT (review_id, location_id, review_date, rating, review_length, 
+          reply_length, has_review, has_reply, review_text, 
+          reply_text, customer_name, review_timestamp, etl_load_time)
+  VALUES (S.review_id, S.location_id, S.review_date, S.rating, S.review_length,
+          S.reply_length, S.has_review, S.has_reply, S.review_text,
+          S.reply_text, S.customer_name, TIMESTAMP(S.source_timestamp_string), S.etl_load_time)
+"""
         query_job = bq.query(merge_query)
         query_job.result()
         logger.info(f"Merged {query_job.num_dml_affected_rows} rows to fact table")
